@@ -1,16 +1,116 @@
 import { useState, useCallback } from 'react'
 
-const COLORS = {
-  navy: '#0D1B2A',
-  gold: '#C9A84C',
-  goldLight: '#E8C97A',
-  cream: '#FAF7F0',
-  navyLight: '#1a2e45',
-  navyMid: '#152236',
-  border: '#2a3f5a',
-  textMuted: '#8aa0b8',
+// ─── Stamp Duty Land Tax (England & N. Ireland — April 2025 rates) ──────────
+function calcStampDuty(price, buyerType) {
+  if (!price || price <= 0) return null
+
+  // First-time buyer relief
+  if (buyerType === 'first-time') {
+    if (price <= 300000) {
+      return {
+        total: 0, effectiveRate: 0,
+        breakdown: [{ label: 'Up to £300,000', rate: '0%', tax: 0 }],
+        note: 'First-time buyer relief — no SDLT payable on this purchase.',
+      }
+    }
+    if (price <= 500000) {
+      const tax = (price - 300000) * 0.05
+      return {
+        total: tax, effectiveRate: (tax / price) * 100,
+        breakdown: [
+          { label: '£0 – £300,000', rate: '0%', tax: 0 },
+          { label: `£300,001 – £${price.toLocaleString('en-GB')}`, rate: '5%', tax },
+        ],
+        note: 'First-time buyer relief applied.',
+      }
+    }
+    // Over £500k — standard rates apply, no FTB relief
+  }
+
+  const isAdditional = buyerType === 'additional'
+  const bands = isAdditional
+    ? [
+        { from: 0,       to: 125000,   rate: 0.03 },
+        { from: 125000,  to: 250000,   rate: 0.05 },
+        { from: 250000,  to: 925000,   rate: 0.08 },
+        { from: 925000,  to: 1500000,  rate: 0.13 },
+        { from: 1500000, to: Infinity, rate: 0.15 },
+      ]
+    : [
+        { from: 0,       to: 125000,   rate: 0.00 },
+        { from: 125000,  to: 250000,   rate: 0.02 },
+        { from: 250000,  to: 925000,   rate: 0.05 },
+        { from: 925000,  to: 1500000,  rate: 0.10 },
+        { from: 1500000, to: Infinity, rate: 0.12 },
+      ]
+
+  let total = 0
+  const breakdown = []
+  for (const b of bands) {
+    if (price <= b.from) break
+    const ceiling = b.to === Infinity ? price : Math.min(price, b.to)
+    const taxable = ceiling - b.from
+    const tax = taxable * b.rate
+    total += tax
+    breakdown.push({
+      label: `£${b.from.toLocaleString('en-GB')} – £${ceiling.toLocaleString('en-GB')}`,
+      rate: `${(b.rate * 100).toFixed(0)}%`,
+      tax,
+    })
+  }
+
+  return {
+    total,
+    effectiveRate: (total / price) * 100,
+    breakdown,
+    note: isAdditional
+      ? '3% surcharge applied — additional/buy-to-let property.'
+      : buyerType === 'first-time'
+      ? 'No first-time buyer relief above £500,000 — standard rates apply.'
+      : null,
+  }
 }
 
+// ─── Overpayment Calculator ─────────────────────────────────────────────────
+function calcOverpayment(loanAmount, annualRate, termMonths, overpayment) {
+  if (!overpayment || overpayment <= 0 || !loanAmount || !annualRate || annualRate <= 0) return null
+  const r = annualRate / 100 / 12
+  const stdMonthly = (loanAmount * r * Math.pow(1 + r, termMonths)) / (Math.pow(1 + r, termMonths) - 1)
+  const totalStdInterest = stdMonthly * termMonths - loanAmount
+  const newMonthly = stdMonthly + overpayment
+  let bal = loanAmount, totalInterestOP = 0, months = 0
+  while (bal > 0.01 && months < termMonths) {
+    const interest = bal * r
+    totalInterestOP += interest
+    bal -= Math.min(newMonthly - interest, bal)
+    months++
+  }
+  const monthsSaved = termMonths - months
+  return {
+    monthsSaved,
+    yearsSaved: Math.floor(monthsSaved / 12),
+    remMonthsSaved: monthsSaved % 12,
+    interestSaved: totalStdInterest - totalInterestOP,
+    newTermYears: Math.floor(months / 12),
+    newTermMonths: months % 12,
+  }
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+function fmt(n) { return '£' + Math.round(n).toLocaleString('en-GB') }
+function fmtPct(n) { return n.toFixed(2) + '%' }
+
+function calcMonthlyPayment(principal, annualRate, months) {
+  if (annualRate === 0) return principal / months
+  const r = annualRate / 100 / 12
+  return (principal * r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1)
+}
+
+function calcInterestOnly(principal, annualRate) {
+  return (principal * (annualRate / 100)) / 12
+}
+
+// ─── Styles ─────────────────────────────────────────────────────────────────
 const styles = {
   app: { minHeight: '100vh', backgroundColor: '#0D1B2A', fontFamily: "'DM Sans', sans-serif", color: '#FAF7F0' },
   header: { backgroundColor: '#152236', borderBottom: '1px solid #2a3f5a', padding: '20px 24px', display: 'flex', alignItems: 'center', gap: '14px' },
@@ -41,28 +141,40 @@ const styles = {
   tdRight: { padding: '10px 12px', borderBottom: '1px solid #2a3f5a', color: '#FAF7F0', textAlign: 'right' },
   infoBox: { backgroundColor: '#0d1f35', border: '1px solid #2a3f5a', borderRadius: 8, padding: '12px 16px', marginTop: 16, fontSize: 13, color: '#8aa0b8', lineHeight: 1.6 },
   footer: { borderTop: '1px solid #2a3f5a', padding: '20px 24px', textAlign: 'center', fontSize: 11, color: '#8aa0b8', lineHeight: 1.7, marginTop: 20 },
+  // Buyer type toggle
+  toggleGroup: { display: 'flex', gap: 8, marginBottom: 20 },
+  toggleBtn: { flex: 1, padding: '9px 8px', borderRadius: 8, border: '1px solid #2a3f5a', backgroundColor: '#0D1B2A', color: '#8aa0b8', fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif", textAlign: 'center' },
+  toggleBtnActive: { backgroundColor: '#C9A84C', color: '#0D1B2A', border: '1px solid #C9A84C', fontWeight: 700 },
+  // SDLT result
+  sdltSummary: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 0', borderBottom: '1px solid #2a3f5a', marginBottom: 12 },
+  sdltTotal: { fontSize: 28, fontWeight: 700, color: '#E8C97A', fontFamily: "'Playfair Display', serif" },
+  sdltNote: { fontSize: 12, color: '#8aa0b8', fontStyle: 'italic', marginTop: 12 },
+  sdltEmpty: { fontSize: 14, color: '#8aa0b8', textAlign: 'center', padding: '16px 0' },
+  // Savings badge
+  savingsBadge: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 16 },
+  savingItem: { backgroundColor: '#0d2a1a', border: '1px solid #1a5a2a', borderRadius: 10, padding: '14px 16px', textAlign: 'center' },
+  savingValue: { fontSize: 22, fontWeight: 700, color: '#4caf7a', fontFamily: "'Playfair Display', serif" },
+  savingLabel: { fontSize: 11, color: '#7aad7a', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 },
 }
 
-function fmt(n) { return '£' + Math.round(n).toLocaleString('en-GB') }
-function fmtPct(n) { return n.toFixed(2) + '%' }
-
-function calcMonthlyPayment(principal, annualRate, months) {
-  if (annualRate === 0) return principal / months
-  const r = annualRate / 100 / 12
-  return (principal * r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1)
-}
-
-function calcInterestOnly(principal, annualRate) {
-  return (principal * (annualRate / 100)) / 12
-}
-
+// ─── Component ───────────────────────────────────────────────────────────────
 export default function App() {
   const [form, setForm] = useState({
     propertyPrice: '', deposit: '', interestRate: '', termYears: '25',
     repaymentType: 'repayment', fixedPeriod: '2', svr: '7.5', rateAfterFix: '',
+    buyerType: 'home-mover',
   })
   const [results, setResults] = useState(null)
+  const [overpaymentAmount, setOverpaymentAmount] = useState('')
   const set = useCallback((key, val) => setForm(f => ({ ...f, [key]: val })), [])
+
+  // Derived calculations
+  const price = parseFloat(form.propertyPrice)
+  const sdlt = price > 0 ? calcStampDuty(price, form.buyerType) : null
+  const opAmount = parseFloat(overpaymentAmount)
+  const opResult = results && opAmount > 0 && form.repaymentType === 'repayment'
+    ? calcOverpayment(results.loanAmount, parseFloat(form.interestRate), parseInt(form.termYears) * 12, opAmount)
+    : null
 
   const calculate = useCallback(() => {
     const price = parseFloat(form.propertyPrice)
@@ -113,6 +225,8 @@ export default function App() {
       </div>
 
       <main style={styles.main}>
+
+        {/* ── Property & Deposit ── */}
         <div style={styles.card}>
           <h2 style={styles.sectionTitle}>Property & Deposit</h2>
           <div style={styles.grid2}>
@@ -127,6 +241,71 @@ export default function App() {
           </div>
         </div>
 
+        {/* ── Stamp Duty Calculator ── */}
+        <div style={styles.card}>
+          <h2 style={styles.sectionTitle}>Stamp Duty (SDLT)</h2>
+
+          <div style={styles.toggleGroup}>
+            {[
+              { value: 'first-time', label: 'First-Time Buyer' },
+              { value: 'home-mover', label: 'Home Mover' },
+              { value: 'additional', label: 'Additional Property' },
+            ].map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => set('buyerType', opt.value)}
+                style={{ ...styles.toggleBtn, ...(form.buyerType === opt.value ? styles.toggleBtnActive : {}) }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {sdlt ? (
+            <>
+              <div style={styles.sdltSummary}>
+                <div>
+                  <div style={{ fontSize: 12, color: '#8aa0b8', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Stamp Duty Due</div>
+                  <div style={styles.sdltTotal}>{fmt(sdlt.total)}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 12, color: '#8aa0b8', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>Effective Rate</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: '#C9A84C' }}>{fmtPct(sdlt.effectiveRate)}</div>
+                </div>
+              </div>
+
+              <table style={styles.breakdownTable}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Band</th>
+                    <th style={{ ...styles.th, textAlign: 'center' }}>Rate</th>
+                    <th style={{ ...styles.th, textAlign: 'right' }}>Tax</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sdlt.breakdown.map((row, i) => (
+                    <tr key={i}>
+                      <td style={styles.td}>{row.label}</td>
+                      <td style={{ ...styles.td, textAlign: 'center', color: '#C9A84C' }}>{row.rate}</td>
+                      <td style={styles.tdRight}>{fmt(row.tax)}</td>
+                    </tr>
+                  ))}
+                  <tr>
+                    <td style={{ ...styles.td, fontWeight: 700, color: '#FAF7F0', borderBottom: 'none' }}>Total SDLT</td>
+                    <td style={{ ...styles.td, borderBottom: 'none' }}></td>
+                    <td style={{ ...styles.tdRight, fontWeight: 700, color: '#E8C97A', borderBottom: 'none' }}>{fmt(sdlt.total)}</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              {sdlt.note && <p style={styles.sdltNote}>* {sdlt.note}</p>}
+            </>
+          ) : (
+            <p style={styles.sdltEmpty}>Enter a property price above to calculate stamp duty.</p>
+          )}
+        </div>
+
+        {/* ── Mortgage Details ── */}
         <div style={styles.card}>
           <h2 style={styles.sectionTitle}>Mortgage Details</h2>
           <div style={styles.grid2}>
@@ -173,6 +352,7 @@ export default function App() {
 
         {results && (
           <>
+            {/* ── Results ── */}
             <div style={styles.resultsCard}>
               <h2 style={{ ...styles.sectionTitle, marginBottom: 4 }}>Your Results</h2>
               <p style={{ fontSize: 13, color: '#8aa0b8', margin: 0 }}>Based on a {fmt(results.loanAmount)} mortgage over {form.termYears} years</p>
@@ -200,6 +380,7 @@ export default function App() {
               </div>
             </div>
 
+            {/* ── LTV Analysis ── */}
             <div style={styles.card}>
               <h2 style={styles.sectionTitle}>Loan-to-Value Analysis</h2>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
@@ -211,10 +392,11 @@ export default function App() {
               </div>
               <div style={styles.infoBox}>
                 <strong style={{ color: '#FAF7F0' }}>What this means: </strong>
-                {results.ltv <= 60 ? 'Excellent position — you have access to the best rates available.' : results.ltv <= 75 ? 'Good position — you\'ll qualify for competitive rates from most mainstream lenders.' : results.ltv <= 85 ? 'Standard LTV — good product choice but you won\'t access the very best rates.' : 'High LTV — product choice is more limited and rates will be higher. Consider a larger deposit if possible.'}
+                {results.ltv <= 60 ? 'Excellent position — you have access to the best rates available.' : results.ltv <= 75 ? "Good position — you'll qualify for competitive rates from most mainstream lenders." : results.ltv <= 85 ? "Standard LTV — good product choice but you won't access the very best rates." : 'High LTV — product choice is more limited and rates will be higher. Consider a larger deposit if possible.'}
               </div>
             </div>
 
+            {/* ── Affordability Check ── */}
             <div style={styles.card}>
               <h2 style={styles.sectionTitle}>Affordability Check</h2>
               <table style={styles.breakdownTable}>
@@ -244,6 +426,55 @@ export default function App() {
                 {fmt(results.recommendedIncome / 12)}/month gross ({fmt(results.recommendedIncome)}/year) — lenders typically want your mortgage payment to be no more than 28–35% of gross income. Indicative only.
               </div>
             </div>
+
+            {/* ── Overpayment Calculator ── */}
+            {form.repaymentType === 'repayment' && (
+              <div style={styles.card}>
+                <h2 style={styles.sectionTitle}>Overpayment Calculator</h2>
+                <p style={{ fontSize: 13, color: '#8aa0b8', marginTop: 0, marginBottom: 16 }}>
+                  See how much time and interest you could save by paying extra each month.
+                </p>
+                <div style={styles.fieldGroup}>
+                  <label style={styles.label}>Extra Monthly Payment (£)</label>
+                  <input
+                    style={styles.input}
+                    type="number"
+                    placeholder="e.g. 200"
+                    value={overpaymentAmount}
+                    onChange={e => setOverpaymentAmount(e.target.value)}
+                  />
+                  <span style={styles.inputHint}>On top of your standard monthly payment of {fmt(results.monthlyFixed)}</span>
+                </div>
+
+                {opResult && (
+                  <>
+                    <div style={styles.savingsBadge}>
+                      <div style={styles.savingItem}>
+                        <div style={styles.savingLabel}>Interest Saved</div>
+                        <div style={styles.savingValue}>{fmt(opResult.interestSaved)}</div>
+                        <div style={{ fontSize: 11, color: '#7aad7a', marginTop: 3 }}>total saving</div>
+                      </div>
+                      <div style={styles.savingItem}>
+                        <div style={styles.savingLabel}>Time Saved</div>
+                        <div style={styles.savingValue}>
+                          {opResult.yearsSaved > 0 ? `${opResult.yearsSaved}y ` : ''}{opResult.remMonthsSaved > 0 ? `${opResult.remMonthsSaved}m` : ''}
+                          {opResult.yearsSaved === 0 && opResult.remMonthsSaved === 0 ? '< 1m' : ''}
+                        </div>
+                        <div style={{ fontSize: 11, color: '#7aad7a', marginTop: 3 }}>off your term</div>
+                      </div>
+                    </div>
+                    <div style={styles.infoBox}>
+                      <strong style={{ color: '#FAF7F0' }}>New mortgage term: </strong>
+                      {opResult.newTermYears} years{opResult.newTermMonths > 0 ? ` and ${opResult.newTermMonths} months` : ''}, down from {form.termYears} years — paying {fmt(parseFloat(overpaymentAmount))} extra per month.
+                    </div>
+                  </>
+                )}
+
+                {!opResult && overpaymentAmount && parseFloat(overpaymentAmount) > 0 && (
+                  <div style={{ ...styles.infoBox, marginTop: 12 }}>Enter an amount above to see your savings.</div>
+                )}
+              </div>
+            )}
           </>
         )}
       </main>
@@ -253,6 +484,7 @@ export default function App() {
           <a href="https://ukpropertypulse.co.uk" style={{ color: '#C9A84C', textDecoration: 'none' }}>ukpropertypulse.co.uk</a>
           {' · '}This tool is for educational purposes only and does not constitute financial or mortgage advice.
           <br />UK Property Pulse is not authorised or regulated by the Financial Conduct Authority (FCA). Always seek advice from a qualified, FCA-regulated mortgage broker.
+          <br />Stamp duty figures are for England and Northern Ireland only and are based on rates effective April 2025.
         </p>
       </footer>
     </div>
